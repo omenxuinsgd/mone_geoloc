@@ -120,6 +120,97 @@ export default function App() {
   const [brokerPort, setBrokerPort] = useState(8884); // WebSocket WSS
   const [clientId] = useState(`web_dashboard_${Math.random().toString(16).substring(2, 8)}`);
 
+  // State untuk pilihan mode peta
+  const [mapLayerMode, setMapLayerMode] = useState('voyager'); // 'voyager' | 'streets' | 'satellite' | 'dark' | 'terrain'
+  const tileLayerRef = useRef(null);
+
+  const [selectedLogDevice, setSelectedLogDevice] = useState('all');
+
+  // Daftar pilihan tile layer peta
+  const MAP_LAYERS = {
+    voyager: {
+      name: 'Carto Voyager',
+      url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+      attribution: '&copy; OpenStreetMap &copy; CARTO'
+    },
+    streets: {
+      name: 'OpenStreetMap Standard',
+      url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      attribution: '&copy; OpenStreetMap contributors'
+    },
+    satellite: {
+      name: 'Google Satellite / Hybrid',
+      url: 'https://{s}.google.com/vt/lyrs=s,h&x={x}&y={y}&z={z}',
+      maxZoom: 20,
+      subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+      attribution: '&copy; Google Maps'
+    },
+    dark: {
+      name: 'Carto Dark Matter',
+      url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+      attribution: '&copy; OpenStreetMap &copy; CARTO Dark'
+    },
+    terrain: {
+      name: 'Stamen / Terrain',
+      url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+      maxZoom: 17,
+      attribution: '&copy; OpenTopoMap contributors'
+    }
+  };
+
+  useEffect(() => {
+    if (!scriptsReady || !mapContainerRef.current || mapInstanceRef.current) return;
+
+    const L = window.L;
+    const initialLat = -6.317718;
+    const initialLng = 106.687184;
+
+    const map = L.map(mapContainerRef.current, {
+      center: [initialLat, initialLng],
+      zoom: 15,
+      zoomControl: false
+    });
+
+    // Pasang layer awal
+    const currentLayerConfig = MAP_LAYERS[mapLayerMode];
+    const tileLayer = L.tileLayer(currentLayerConfig.url, {
+      attribution: currentLayerConfig.attribution,
+      subdomains: currentLayerConfig.subdomains || 'abc',
+      maxZoom: currentLayerConfig.maxZoom || 20
+    }).addTo(map);
+
+    tileLayerRef.current = tileLayer;
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+    mapInstanceRef.current = map;
+
+    return () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
+    };
+  }, [scriptsReady]);
+
+  // Efek untuk mengganti tile layer ketika mode berubah
+  useEffect(() => {
+    if (!mapInstanceRef.current || !window.L) return;
+    const L = window.L;
+    const map = mapInstanceRef.current;
+    const config = MAP_LAYERS[mapLayerMode];
+
+    if (tileLayerRef.current) {
+      map.removeLayer(tileLayerRef.current);
+    }
+
+    const newTileLayer = L.tileLayer(config.url, {
+      attribution: config.attribution,
+      subdomains: config.subdomains || 'abc',
+      maxZoom: config.maxZoom || 20
+    }).addTo(map);
+
+    tileLayerRef.current = newTileLayer;
+  }, [mapLayerMode]);
+
   // TOPIC MANAGEMENT WITH CACHING (localStorage & URL Sync)
   const DEFAULT_TOPICS = [
     { id: '1', topic: 'device/+/location', label: 'Primary Multi-Device', active: true }
@@ -327,6 +418,12 @@ export default function App() {
       const topicName = message.destinationName;
       const parsed = JSON.parse(payloadStr);
 
+      // Tentukan ID
+      let devId = parsed.client_id || message.destinationName.split('/')[1];
+
+      // --- TAMBAHKAN FILTER INI ---
+      if (hiddenDevices.includes(devId)) return;
+
       if (typeof parsed.latitude === 'number' && typeof parsed.longitude === 'number') {
         // Extract device ID from topic (e.g. device/laptop-1/location) or payload client_id
         let devId = parsed.client_id;
@@ -524,6 +621,31 @@ export default function App() {
     downloadAnchor.remove();
   };
 
+  const removeDevice = (devId, e) => {
+  if (e) e.stopPropagation();
+
+  // 1. Tambahkan ke daftar abaikan
+  setHiddenDevices((prev) => [...prev, devId]);
+
+  // 2. Hapus dari state saat ini
+  if (markersRef.current[devId]) {
+    if (mapInstanceRef.current) mapInstanceRef.current.removeLayer(markersRef.current[devId]);
+    delete markersRef.current[devId];
+  }
+  if (polylinesRef.current[devId]) {
+    if (mapInstanceRef.current) mapInstanceRef.current.removeLayer(polylinesRef.current[devId]);
+    delete polylinesRef.current[devId];
+  }
+
+  setDevices((prev) => {
+    const updated = { ...prev };
+    delete updated[devId];
+    return updated;
+  });
+
+  if (selectedDeviceId === devId) setSelectedDeviceId('all');
+};
+
   const importTopicsJson = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -547,6 +669,18 @@ export default function App() {
     }
     setConnectionStatus('DISCONNECTED');
   }, []);
+
+  // Tambahkan di dalam komponen App
+const [hiddenDevices, setHiddenDevices] = useState(() => {
+  if (typeof window === 'undefined') return [];
+  const saved = localStorage.getItem('mqtt_hidden_devices');
+  return saved ? JSON.parse(saved) : [];
+});
+
+// Simpan perubahan ke localStorage setiap kali hiddenDevices berubah
+useEffect(() => {
+  localStorage.setItem('mqtt_hidden_devices', JSON.stringify(hiddenDevices));
+}, [hiddenDevices]);
 
   useEffect(() => {
     if (scriptsReady && connectionStatus === 'DISCONNECTED') {
@@ -940,6 +1074,14 @@ if __name__ == "__main__":
               <span className="text-xs bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 px-2 py-0.5 rounded-full font-medium">
                 {deviceList.length} Active
               </span>
+              {hiddenDevices.length > 0 && (
+                <button 
+                  onClick={() => setHiddenDevices([])}
+                  className="text-xs text-indigo-400 hover:text-indigo-300 underline mt-2"
+                >
+                  Tampilkan kembali semua perangkat yang disembunyikan
+                </button>
+              )}
             </div>
 
             {/* DEVICE SELECTOR TABS */}
@@ -956,19 +1098,27 @@ if __name__ == "__main__":
               </button>
 
               {deviceList.map((dev) => (
-                <button
-                  key={dev.id}
-                  onClick={() => setSelectedDeviceId(dev.id)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1.5 border ${
-                    selectedDeviceId === dev.id
-                      ? 'bg-slate-800 text-white border-indigo-500/80 shadow-md'
-                      : 'bg-slate-950/60 text-slate-400 border-slate-800 hover:text-slate-200'
-                  }`}
-                >
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: dev.color.hex }}></span>
-                  <span>{dev.id}</span>
-                </button>
-              ))}
+  <div
+    key={dev.id}
+    className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1.5 border cursor-pointer ${
+      selectedDeviceId === dev.id
+        ? 'bg-slate-800 text-white border-indigo-500/80 shadow-md'
+        : 'bg-slate-950/60 text-slate-400 border-slate-800 hover:text-slate-200'
+    }`}
+    onClick={() => setSelectedDeviceId(dev.id)}
+  >
+    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: dev.color.hex }}></span>
+    <span>{dev.id}</span>
+    {/* Tombol Hapus di Tab */}
+    <button
+      onClick={(e) => removeDevice(dev.id, e)}
+      className="ml-1 text-slate-500 hover:text-rose-400 p-0.5 rounded transition-colors"
+      title={`Hapus ${dev.id}`}
+    >
+      ✕
+    </button>
+  </div>
+))}
             </div>
 
             {/* DEVICE LIST CARDS */}
@@ -993,17 +1143,28 @@ if __name__ == "__main__":
                       }`}
                     >
                       <div className="flex items-center justify-between mb-1.5">
-                        <div className="flex items-center space-x-2">
-                          <span
-                            className="w-3 h-3 rounded-full shadow-sm"
-                            style={{ backgroundColor: dev.color.hex }}
-                          ></span>
-                          <span className="font-semibold text-xs text-slate-200">{dev.id}</span>
-                        </div>
-                        <span className="text-[10px] text-slate-400 font-mono">
-                          {new Date(dev.timestamp).toLocaleTimeString()}
-                        </span>
-                      </div>
+  <div className="flex items-center space-x-2">
+    <span
+      className="w-3 h-3 rounded-full shadow-sm"
+      style={{ backgroundColor: dev.color.hex }}
+    ></span>
+    <span className="font-semibold text-xs text-slate-200">{dev.id}</span>
+  </div>
+  
+  {/* Tambahkan Tombol Hapus di Card */}
+  <div className="flex items-center space-x-2">
+    <span className="text-[10px] text-slate-400 font-mono">
+      {new Date(dev.timestamp).toLocaleTimeString()}
+    </span>
+    <button
+      onClick={(e) => removeDevice(dev.id, e)}
+      className="text-slate-500 hover:text-rose-400 p-1 rounded transition-colors"
+      title="Hapus Device"
+    >
+      <Icons.Trash />
+    </button>
+  </div>
+</div>
 
                       <div className="grid grid-cols-2 gap-2 text-[11px] font-mono mt-2">
                         <div className="bg-slate-900/80 p-1.5 rounded border border-slate-800/60">
@@ -1034,6 +1195,21 @@ if __name__ == "__main__":
           {/* MAP DISPLAY */}
           <div className="relative bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl h-[500px] lg:h-[560px]">
             <div ref={mapContainerRef} className="w-full h-full z-10" />
+
+            {/* TAMBAHKAN DROPDOWN PILIHAN MODE PETA DI POJOK KIRI ATAS */}
+            <div className="absolute top-4 left-4 z-20">
+              <select
+                value={mapLayerMode}
+                onChange={(e) => setMapLayerMode(e.target.value)}
+                className="bg-slate-900/90 text-slate-200 border border-slate-700/80 rounded-xl px-3 py-2 text-xs font-medium shadow-lg backdrop-blur-md focus:outline-none focus:border-indigo-500 cursor-pointer"
+              >
+                <option value="voyager">🗺️ Carto Voyager (Default)</option>
+                <option value="streets">🛣️ OpenStreetMap (Streets)</option>
+                <option value="satellite">🛰️ Google Satellite / Hybrid</option>
+                <option value="dark">🌙 Dark Mode</option>
+                <option value="terrain">⛰️ Terrain / Topo</option>
+              </select>
+            </div>
 
             {/* FLOATING CONTROLS */}
             <div className="absolute top-4 right-4 z-20 flex flex-col space-y-2">
@@ -1072,46 +1248,67 @@ if __name__ == "__main__":
           </div>
 
           {/* MQTT MULTI LOG FEED */}
-          <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-4 shadow-xl flex-1 flex flex-col max-h-[260px]">
-            <div className="flex items-center justify-between mb-2 border-b border-slate-800 pb-2">
-              <h3 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
-                Live Data Stream (Semua Topik Aktif)
-              </h3>
-              <button onClick={() => setLogs([])} className="text-[11px] text-slate-500 hover:text-slate-300">
-                Clear Logs
-              </button>
-            </div>
+<div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-4 shadow-xl flex-1 flex flex-col max-h-[260px]">
+  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-2 border-b border-slate-800 pb-2 gap-2">
+    <div className="flex items-center space-x-3">
+      <h3 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+        Live Data Stream
+      </h3>
+      {/* Selectbox untuk Filter Log Perangkat */}
+      <select
+        value={selectedLogDevice}
+        onChange={(e) => setSelectedLogDevice(e.target.value)}
+        className="bg-slate-950 border border-slate-800 text-indigo-300 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-indigo-500 font-mono"
+      >
+        <option value="all">Semua Perangkat</option>
+        {deviceList.map((dev) => (
+          <option key={dev.id} value={dev.id}>
+            {dev.id}
+          </option>
+        ))}
+      </select>
+    </div>
+
+    <button onClick={() => setLogs([])} className="text-[11px] text-slate-500 hover:text-slate-300">
+      Clear Logs
+    </button>
+  </div>
 
             <div className="overflow-y-auto flex-1 pr-1 space-y-1.5 font-mono text-[11px]">
-              {logs.length === 0 ? (
-                <div className="text-center py-6 text-slate-600 text-xs font-sans">
-                  Menunggu paket data dari topik terdaftar...
-                </div>
-              ) : (
-                logs.map((log) => (
-                  <div
-                    key={log.id}
-                    className="flex items-center justify-between bg-slate-950/60 hover:bg-slate-950 px-3 py-2 rounded-lg border border-slate-800/50 transition-colors"
-                  >
-                    <div className="flex items-center space-x-2.5 truncate">
-                      <span className="text-slate-500 text-[10px]">{log.time}</span>
-                      <span className="text-indigo-400 font-semibold px-1.5 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/20">
-                        {log.deviceId}
-                      </span>
-                      <span className="text-slate-400 text-[10px] truncate max-w-[140px]">{log.topic}</span>
-                      <span className="text-slate-300 truncate max-w-xs">{log.payload}</span>
-                    </div>
-                    <span
-                      className={`px-2 py-0.5 rounded text-[9px] font-semibold ${
-                        log.success ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'
-                      }`}
-                    >
-                      {log.success ? 'OK' : 'ERR'}
-                    </span>
-                  </div>
-                ))
-              )}
-            </div>
+  {logs.filter((log) => selectedLogDevice === 'all' || log.deviceId === selectedLogDevice).length === 0 ? (
+    <div className="text-center py-6 text-slate-600 text-xs font-sans">
+      Tidak ada log untuk perangkat ini...
+    </div>
+  ) : (
+    logs
+      .filter((log) => selectedLogDevice === 'all' || log.deviceId === selectedLogDevice)
+      .map((log) => (
+        <div
+          key={log.id}
+          className="flex items-center justify-between bg-slate-950/60 hover:bg-slate-950 px-3 py-2 rounded-lg border border-slate-800/50 transition-colors"
+        >
+          <div className="flex items-center space-x-2.5 truncate">
+            <span className="text-slate-500 text-[10px]">{log.time}</span>
+            <span className="text-indigo-400 font-semibold px-1.5 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/20">
+              {log.deviceId}
+            </span>
+            <span className="text-slate-400 text-[10px] truncate max-w-[140px]">{log.topic}</span>
+            {/* PAYLOAD DITAMPILKAN FULL TANPA TRUNCATE */}
+            <span className="text-slate-300 break-all text-xs bg-slate-900/90 px-2 py-1 rounded border border-slate-800 w-full sm:w-auto flex-1">
+              {log.payload}
+            </span>
+          </div>
+          <span
+            className={`px-2 py-0.5 rounded text-[9px] font-semibold ${
+              log.success ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'
+            }`}
+          >
+            {log.success ? 'OK' : 'ERR'}
+          </span>
+        </div>
+      ))
+  )}
+</div>
           </div>
 
         </div>
